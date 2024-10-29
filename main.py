@@ -41,8 +41,8 @@ logging.basicConfig(
 )
 
 # Load environment variables
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", '6206446036:AAHtVn9LAvdRUtjCLmz1_49v5xRPSanTD1g')
-MONGO_URI = os.getenv("MONGO_URI", 'mongodb://localhost:27017')
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+MONGO_URI = os.getenv("MONGO_URI")
 
 # Initialize bot with default properties
 bot = Bot(
@@ -56,7 +56,7 @@ dp = Dispatcher(storage=memory_storage)  # Initialize Dispatcher with in-memory 
 
 # Initialize MongoDB client
 client = AsyncIOMotorClient(MONGO_URI, maxPoolSize=100)  # Handle 100 concurrent connections
-db = client["polls_database"]
+db = client["govtprepbuddy_database"]
 users_collection = db["users"]
 polls_collection = db["polls"]
 
