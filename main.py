@@ -413,23 +413,48 @@ async def handle_pay_for_access(call: types.CallbackQuery):
 
 
 
+# Define FSM states for the broadcast flow
+class BroadcastStates(StatesGroup):
+    waiting_for_message = State()
+
 @dp.message(Command("broadcast"))
-async def broadcast_message(message: types.Message):
-    """Broadcast a message to all users."""
+async def start_broadcast(message: types.Message, state: FSMContext):
+    """Initiate the broadcast process by asking for the message."""
     if not is_admin(message.from_user.id):
         await message.reply("This command is restricted to admins.")
         return
 
+    await message.answer("📢 Please enter the message to broadcast:")
+    await state.set_state(BroadcastStates.waiting_for_message)
+
+@dp.message(BroadcastStates.waiting_for_message)
+async def process_broadcast_message(message: types.Message, state: FSMContext):
+    """Process the message to broadcast and start sending in batches."""
+    broadcast_text = message.text
     users = await users_collection.find({}, {"user_id": 1}).to_list(length=None)
 
-    async def send_message(user):
-        try:
-            await bot.send_message(user["user_id"], message.text)
-        except Exception as e:
-            logging.error(f"Failed to send message to {user['user_id']}: {e}")
+    # Split the users into batches to avoid hitting rate limits
+    BATCH_SIZE = 50  # Number of users per batch
+    MAX_MESSAGES_PER_SECOND = 20  # Telegram API limit
 
-    await asyncio.gather(*(send_message(user) for user in users))
-    await message.answer("Broadcast completed!")
+    async def send_message(user):
+        """Send the broadcast message to a single user."""
+        try:
+            await bot.send_message(user["user_id"], broadcast_text)
+        except Exception as e:
+            logging.error(f"Failed to send message to {user['user_id']}: {str(e)}")
+
+    async def broadcast_in_batches():
+        """Broadcast the message to all users in batches."""
+        for i in range(0, len(users), BATCH_SIZE):
+            batch = users[i:i + BATCH_SIZE]
+            await asyncio.gather(*(send_message(user) for user in batch))
+            await asyncio.sleep(1 / MAX_MESSAGES_PER_SECOND)  # Rate limiting
+
+    await broadcast_in_batches()
+    await message.answer("✅ Broadcast completed successfully!")
+    await state.clear()
+
 
 
 
