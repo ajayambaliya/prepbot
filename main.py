@@ -1,3 +1,16 @@
+from dotenv import load_dotenv
+import os
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Retrieve the variables
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+MONGO_URI = os.getenv("MONGO_URI")
+
+# Debug: Check if the variables are loaded correctly
+print(f"Bot Token: {BOT_TOKEN}")
+print(f"Mongo URI: {MONGO_URI}")
 # Core Python imports
 import asyncio  # For asynchronous operations and event loops
 import logging  # For logging messages and debugging
