@@ -31,6 +31,8 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage  # In-memory FSM storage
 import random
 from datetime import datetime, timedelta
+import uuid  # For generating unique session IDs
+
 
 
 # Ensure environment variables are loaded correctly
@@ -592,28 +594,69 @@ def chunk_text(text, max_length=4096):
         text = text[split_index:].strip()
     return chunks
 
-async def check_quiz_timeout(user_id, chat_id):
+async def check_quiz_timeout(user_id, session_id, chat_id, timeout_duration):
     """Check if the quiz has timed out and display the result if necessary."""
-    await asyncio.sleep(QUIZ_TIMEOUT)
-    session = await db["user_sessions"].find_one({"user_id": user_id})
+    try:
+        # Wait for the dynamically calculated timeout duration
+        await asyncio.sleep(timeout_duration)
 
-    if session and session.get("answered", 0) < session.get("sent", 0):
-        await bot.send_message(chat_id, "⏳ Time's up! Here's your quiz summary:")
-        await store_and_show_result(user_id, chat_id)
+        # Re-fetch the session to ensure it's still valid
+        session = await db["user_sessions"].find_one({"user_id": user_id, "session_id": session_id})
+
+        # If the session is still active and not all questions are answered
+        if session and session.get("answered", 0) < session.get("sent", 0):
+            await bot.send_message(chat_id, "⏳ Time's up! Here's your quiz summary:")
+            await store_and_show_result(user_id, chat_id)
+
+    except Exception as e:
+        logging.error(f"Error in check_quiz_timeout: {e}")
+
 
 @dp.message(Command("track_plan"))
 async def handle_track_plan_command(message: types.Message):
-    """Handle /track_plan command to display the user's plan details."""
+    """Handle /track_plan command to display the user's plan details and free questions left."""
     user_id = message.from_user.id
     user = await users_collection.find_one({"user_id": user_id})
 
+    # Check if the user has unlimited access
     if user and user.get("unlimited_access"):
         expiry_date = user.get("unlimited_access_expiry")
         await message.answer(
-            f"📅 Your unlimited access is valid until {expiry_date.strftime('%d %B %Y')}."
+            f"🎉 *You are an Unlimited User!* \n"
+            f"🗓 *Your Access Valid Until* : {expiry_date.strftime('%d %B %Y')}.\n"
+            "Enjoy unlimited quizzes without restrictions! 🚀"
         )
-    else:
-        await message.answer("You don't have an active unlimited access plan.")
+        return  # Stop further execution for unlimited users
+
+    # Fetch free questions left today
+    daily_questions = await get_user_daily_questions(user_id)
+    questions_left = max(0, 30 - daily_questions)  # Ensure non-negative
+
+    # Prepare message for free users
+    free_user_message = (
+        f"📋 *You are a Free User.*\n"
+        f"🎯 *Daily Limit*: 30 questions per day.\n"
+        f"📊 *Questions Left Today*: {questions_left}.\n\n"
+        "🔓 Unlock unlimited access to continue playing without limits!"
+    )
+
+    # Reply with the message and show a button to pay for unlimited access
+    await message.answer(
+        free_user_message,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="💳 Pay for Unlimited Access", callback_data="pay_for_access"
+                    )
+                ]
+            ]
+        )
+    )
+
+
+
 
 @dp.message(Command("pay"))
 async def handle_pay_command(message: types.Message):
@@ -954,17 +997,24 @@ async def has_valid_unlimited_access(user_id: int) -> bool:
 
 
 
-
-
 async def send_quiz(message, questions, requested_count, language):
     """Send quiz questions to the user."""
     user_id = message.from_user.id
+    chat_id = message.chat.id
     question_ids = [q['_id'] for q in questions]
 
+    # Generate a unique session ID for this quiz session
+    session_id = str(uuid.uuid4())
+
+    # Calculate the dynamic timeout duration (30 seconds per question)
+    timeout_duration = requested_count * 30  # e.g., 15 questions -> 450 seconds
+
+    # Store the session in the database
     await db["user_sessions"].update_one(
         {"user_id": user_id},
         {
             "$set": {
+                "session_id": session_id,
                 "question_ids": question_ids,
                 "answered": 0,
                 "sent": requested_count,
@@ -975,6 +1025,7 @@ async def send_quiz(message, questions, requested_count, language):
         upsert=True
     )
 
+    # Function to send each poll question
     async def send_poll(question_id):
         question = await polls_collection.find_one({"_id": question_id})
         lang_data = question['languages'][language]
@@ -982,7 +1033,7 @@ async def send_quiz(message, questions, requested_count, language):
 
         try:
             poll = await bot.send_poll(
-                chat_id=message.chat.id,
+                chat_id=chat_id,
                 question=lang_data['question'],
                 options=lang_data['options'][:10],
                 type='quiz',
@@ -993,8 +1044,13 @@ async def send_quiz(message, questions, requested_count, language):
         except Exception as e:
             logging.error(f"Error sending poll: {e}")
 
+    # Send all quiz questions concurrently
     await asyncio.gather(*(send_poll(q) for q in question_ids))
-    await message.answer(f"✅ {requested_count} questions sent! Answer All Question then Explanation come as seprate message and Your Sccore will be updated in Leaderboard.")
+
+    # Start the timeout task with the calculated duration
+    asyncio.create_task(check_quiz_timeout(user_id, session_id, chat_id, timeout_duration))
+
+    await message.answer(f"✅ {requested_count} questions sent! Answer them quickly to avoid timeout And After answering all question you will get explnantions and your result will be uploadede to leaderboard.")
 
 @dp.poll_answer()
 async def handle_poll_answer(poll_answer: PollAnswer):
@@ -1101,14 +1157,7 @@ def chunk_text(text, max_length=4096):
         text = text[split_index:].strip()
     return chunks
 
-async def check_quiz_timeout(user_id, chat_id):
-    """Check if the quiz has timed out and display the result if necessary."""
-    await asyncio.sleep(QUIZ_TIMEOUT)
-    session = await db["user_sessions"].find_one({"user_id": user_id})
 
-    if session and session.get("answered", 0) < session.get("sent", 0):
-        await bot.send_message(chat_id, "⏳ Time's up! Here's your quiz summary:")
-        await store_and_show_result(user_id, chat_id)
 
 @dp.message(Command("grant_access"))
 async def handle_grant_access(message: types.Message):
