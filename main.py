@@ -15,6 +15,7 @@ print(f"Mongo URI: {MONGO_URI}")
 import asyncio  # For asynchronous operations and event loops
 import logging  # For logging messages and debugging
 from datetime import datetime, timedelta  # For handling dates and time calculations
+import os  # For interacting with the environment and loading environment variables
 import calendar  # For working with calendar dates
 
 # Aiogram core imports and filter handlers
@@ -37,14 +38,17 @@ from motor.motor_asyncio import AsyncIOMotorClient  # Asynchronous MongoDB drive
 
 # Load environment variables from .env files
 from dotenv import load_dotenv
-import os
 import re
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage  # In-memory FSM storage
 import random
+from datetime import datetime, timedelta
+import uuid  # For generating unique session IDs
 
-# Load environment variables from .env file
+
+
+# Ensure environment variables are loaded correctly
 load_dotenv()
 
 # Initialize logging
@@ -56,10 +60,6 @@ logging.basicConfig(
 # Load environment variables
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
-
-# Debug: Check if the variables are loaded correctly
-print(f"Bot Token: {BOT_TOKEN}")
-print(f"Mongo URI: {MONGO_URI}")
 
 # Initialize bot with default properties
 bot = Bot(
@@ -87,7 +87,7 @@ poll_tracking = {}  # Track poll_id to correct_option_id mapping
 async def set_bot_commands():
     """Set commands for the bot's menu."""
     commands = [
-        BotCommand(command="start", description="🔥 Start the bot"),
+        BotCommand(command="start", description="🔥 Start the Quiz"),
         BotCommand(command="track_plan", description="📋 Track Plan Details"),
         BotCommand(command="pay", description="✅ Pay for Unlimited Access"),
         BotCommand(command="result", description="📊 View Your Last Quiz Result"),
@@ -288,19 +288,39 @@ async def process_question_count(message: types.Message, state: FSMContext):
         if not (1 <= count <= 15):
             raise ValueError
     except ValueError:
-        await message.reply("Please enter a valid number between 1 and 15.")
+        await message.reply("❌ Please enter a valid number between 1 and 15.")
         return
 
-    # Ensure the user does not exceed the daily limit (unless they have unlimited access)
+    # If the user has unlimited access, check the hourly limit.
+    if has_unlimited_access:
+        can_request, wait_message = await can_request_more_questions(user_id)
+        if not can_request:
+            await message.reply(wait_message)
+            return
+        # Update the hourly question count.
+        await update_hourly_request_count(user_id, count)
+
+    # Ensure the user does not exceed the daily limit (only for non-unlimited users).
     if not has_unlimited_access and daily_questions + count > 30:
         remaining = max(0, 30 - daily_questions)
         if remaining > 0:
-            await message.reply(f"You can only request {remaining} more questions today.")
+            await message.reply(f"⚠️ You can only request {remaining} more questions today.")
         else:
-            await message.reply("You've reached the daily limit. Consider unlocking unlimited access.")
+            await message.answer(
+                "🚫 You've reached the daily limit of 30 questions.\n"
+                "🔓 *Unlock Unlimited Access* for just ₹49 For 1 Month to continue playing without limits!",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[[
+                        InlineKeyboardButton(
+                            text="💳 Buy Unlimited Access", callback_data="pay_for_access"
+                        )
+                    ]]
+                )
+            )
         return
 
-    # Fetch questions based on the user's selected category or date
+    # Fetch questions based on the user's selection
     questions = await fetch_questions_by_category_or_date(state)
     if not questions:
         await message.reply("❌ No questions found for your selection.")
@@ -308,15 +328,18 @@ async def process_question_count(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
-    # Send the quiz to the user and update the daily questions count
+    # Send the quiz to the user and update the daily question count for non-unlimited users.
     selected_questions = random.sample(questions, min(count, len(questions)))
     await send_quiz(message, selected_questions, count, language)
 
-    # Increment the daily question count
+    # Increment the daily question count only for non-unlimited users.
     if not has_unlimited_access:
         await update_user_daily_questions(user_id, count)
+        await message.reply(
+            f"✅ {count} questions sent! {30 - daily_questions - count} questions remaining today."
+        )
 
-    await message.reply(f"✅ {count} questions sent! {30 - daily_questions - count} questions remaining today.")
+    # Clear the state after sending the quiz.
     await state.clear()
 
 
@@ -371,15 +394,36 @@ async def handle_track_plan(call: types.CallbackQuery):
 
 @dp.callback_query(F.data == "pay_for_access")
 async def handle_pay_for_access(call: types.CallbackQuery):
-    """Handler to send the payment QR code."""
+    """Handler to send the payment QR code with detailed instructions."""
     await call.message.answer_photo(
         photo="https://i.ibb.co/9pLgchY/photo-2024-10-21-09-43-32.jpg",
         caption=(
-            "Scan the QR code to pay ₹49 or Pay to Google Pay 8000212153. "
-            "Send a screenshot to @Ajay_ambaliya for verification. "
-            "You will receive unlimited access for 30 days."
-        )
+            "💳 *Unlock Unlimited Access*\n\n"
+            "🔥 **Pay ₹49** to enjoy unlimited quiz access for *30 days!* 🔓\n\n"
+            "📲 **Payment Methods**:\n"
+            "1️⃣ *Google Pay*: `8000212153`\n"
+            "2️⃣ *Scan the QR Code* above ⬆️\n\n"
+            "📥 *After Payment*: Send a screenshot to [@Ajay_ambaliya](https://t.me/Ajay_ambaliya) for verification.\n\n"
+            "🎁 _Your unlimited access will be activated within minutes._\n\n"
+            "⚠️ *Note*: If you encounter any issues, feel free to contact us via the above link."
+        ),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="📧 Contact Support", url="https://t.me/Ajay_ambaliya"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="🔄 I've Paid, Verify Now", callback_data="verify_payment"
+                    )
+                ],
+            ]
+        ),
     )
+
 
 
 @dp.message(Command("broadcast"))
@@ -563,28 +607,69 @@ def chunk_text(text, max_length=4096):
         text = text[split_index:].strip()
     return chunks
 
-async def check_quiz_timeout(user_id, chat_id):
+async def check_quiz_timeout(user_id, session_id, chat_id, timeout_duration):
     """Check if the quiz has timed out and display the result if necessary."""
-    await asyncio.sleep(QUIZ_TIMEOUT)
-    session = await db["user_sessions"].find_one({"user_id": user_id})
+    try:
+        # Wait for the dynamically calculated timeout duration
+        await asyncio.sleep(timeout_duration)
 
-    if session and session.get("answered", 0) < session.get("sent", 0):
-        await bot.send_message(chat_id, "⏳ Time's up! Here's your quiz summary:")
-        await store_and_show_result(user_id, chat_id)
+        # Re-fetch the session to ensure it's still valid
+        session = await db["user_sessions"].find_one({"user_id": user_id, "session_id": session_id})
+
+        # If the session is still active and not all questions are answered
+        if session and session.get("answered", 0) < session.get("sent", 0):
+            await bot.send_message(chat_id, "⏳ Time's up! Here's your quiz summary:")
+            await store_and_show_result(user_id, chat_id)
+
+    except Exception as e:
+        logging.error(f"Error in check_quiz_timeout: {e}")
+
 
 @dp.message(Command("track_plan"))
 async def handle_track_plan_command(message: types.Message):
-    """Handle /track_plan command to display the user's plan details."""
+    """Handle /track_plan command to display the user's plan details and free questions left."""
     user_id = message.from_user.id
     user = await users_collection.find_one({"user_id": user_id})
 
+    # Check if the user has unlimited access
     if user and user.get("unlimited_access"):
         expiry_date = user.get("unlimited_access_expiry")
         await message.answer(
-            f"📅 Your unlimited access is valid until {expiry_date.strftime('%d %B %Y')}."
+            f"🎉 *You are an Unlimited User!* \n"
+            f"🗓 *Your Access Valid Until* : {expiry_date.strftime('%d %B %Y')}.\n"
+            "Enjoy unlimited quizzes without restrictions! 🚀"
         )
-    else:
-        await message.answer("You don't have an active unlimited access plan.")
+        return  # Stop further execution for unlimited users
+
+    # Fetch free questions left today
+    daily_questions = await get_user_daily_questions(user_id)
+    questions_left = max(0, 30 - daily_questions)  # Ensure non-negative
+
+    # Prepare message for free users
+    free_user_message = (
+        f"📋 *You are a Free User.*\n"
+        f"🎯 *Daily Limit*: 30 questions per day.\n"
+        f"📊 *Questions Left Today*: {questions_left}.\n\n"
+        "🔓 Unlock unlimited access to continue playing without limits!"
+    )
+
+    # Reply with the message and show a button to pay for unlimited access
+    await message.answer(
+        free_user_message,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="💳 Pay for Unlimited Access", callback_data="pay_for_access"
+                    )
+                ]
+            ]
+        )
+    )
+
+
+
 
 @dp.message(Command("pay"))
 async def handle_pay_command(message: types.Message):
@@ -592,25 +677,71 @@ async def handle_pay_command(message: types.Message):
     user_id = message.from_user.id
     user = await users_collection.find_one({"user_id": user_id})
 
+    # Check if the user already has unlimited access
     if user and user.get("unlimited_access"):
         expiry_date = user.get("unlimited_access_expiry")
         if expiry_date and datetime.now() <= expiry_date:
             await message.answer(
-                f"🎉 You already have unlimited access until {expiry_date.strftime('%d %B %Y')}. No need to pay now!"
+                f"🎉 *You already have unlimited access!* 🎉\n"
+                f"🗓 *Valid Until*: {expiry_date.strftime('%d %B %Y')}.\n"
+                "No need to pay now!"
             )
             return
         elif not expiry_date:
-            await message.answer("🎉 You have lifetime unlimited access. No need to pay now!")
+            await message.answer("🎉 *You have lifetime unlimited access!* No need to pay now!")
             return
 
+    # If no active access, send payment instructions
     await message.answer_photo(
         photo="https://i.ibb.co/9pLgchY/photo-2024-10-21-09-43-32.jpg",
         caption=(
-            "Scan the QR code to pay ₹49 or Pay to Google Pay 8000212153. "
-            "Send a screenshot to @Ajay_ambaliya for verification. "
-            "You will receive unlimited access for 30 days."
+            "💳 *Unlock Unlimited Access Now!* 🔥\n\n"
+            "📥 **Pay ₹49** to get *30 days of unlimited quiz access*!\n\n"
+            "📲 **Payment Methods**:\n"
+            "1️⃣ *Google Pay*: `8000212153`\n"
+            "2️⃣ *Scan the QR Code* above ⬆️\n\n"
+            "✅ *After Payment*: Send a screenshot to [@Ajay_ambaliya](https://t.me/Ajay_ambaliya) for verification.\n"
+            "🎁 _Your access will be activated within minutes._\n\n"
+            "⚠️ *Note*: If you encounter any issues, feel free to reach out using the button below."
+        ),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="📧 Contact Support", url="https://t.me/Ajay_ambaliya"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="🔄 I've Paid, Verify Now", callback_data="verify_payment"
+                    )
+                ]
+            ]
         )
     )
+
+@dp.callback_query(lambda call: call.data == "verify_payment")
+async def handle_verify_payment(call: types.CallbackQuery):
+    """Handler to confirm payment verification process."""
+    await call.answer("🕵️ Verification request received! Please wait while we verify your payment.", show_alert=True)
+
+    # Notify admin (you can customize this as per your use case)
+    admin_chat_id = 201319134  # Replace with your admin chat ID
+    user_id = call.from_user.id
+    username = call.from_user.username or call.from_user.first_name
+
+    try:
+        await bot.send_message(
+            admin_chat_id,
+            f"📩 *Payment Verification Request* \n\n"
+            f"🧑‍💻 *User* : {username} (ID: {user_id})\n"
+            f"✅ *Request* : User has paid and requests verification."
+        )
+        await call.message.answer("📨 Your request has been sent to the admin. You will receive confirmation shortly.")
+    except Exception as e:
+        logging.error(f"Failed to send verification request to admin: {e}")
+        await call.message.answer("⚠️ Could not send your request. Please try again later.")
 
 async def grant_access(user_id: int, duration_days: int = 30):
     """Grant unlimited access to a user."""
@@ -695,20 +826,67 @@ async def handle_revoke_access(message: types.Message):
 
     await message.reply(f"✅ Unlimited access revoked for user {user_id}.")
 
+async def can_request_more_questions(user_id: int) -> tuple[bool, str | None]:
+    """Check if the user with unlimited access can request more questions."""
+    user = await users_collection.find_one({"user_id": user_id})
+
+    if not user or not user.get("unlimited_access"):
+        # This function only applies to unlimited users, other users are handled separately.
+        return False, None
+
+    now = datetime.now()
+    session = user.get("hourly_request_session", {})
+
+    # Retrieve session data or set defaults.
+    first_request_time = session.get("first_request_time", now)
+    question_count = session.get("question_count", 0)
+
+    # If it's been more than an hour, reset the session.
+    if now - first_request_time >= timedelta(hours=1):
+        await users_collection.update_one(
+            {"user_id": user_id},
+            {"$set": {"hourly_request_session": {
+                "first_request_time": now,
+                "question_count": 0
+            }}}
+        )
+        return True, None  # User can request more questions
+
+    # If the user has requested 60 questions within the hour, deny further requests.
+    if question_count >= 60:
+        next_available_time = first_request_time + timedelta(hours=1)
+        wait_time = next_available_time - now
+        return False, f"⏳ You've reached your limit of 60 questions this hour. Please try again in {wait_time}."
+
+    # User can still request more questions within the hour.
+    return True, None
+
+async def update_hourly_request_count(user_id: int, additional_count: int):
+    """Update the user's hourly request count."""
+    user = await users_collection.find_one({"user_id": user_id})
+    session = user.get("hourly_request_session", {})
+
+    # Update the question count in the session.
+    new_count = session.get("question_count", 0) + additional_count
+
+    await users_collection.update_one(
+        {"user_id": user_id},
+        {"$set": {"hourly_request_session.question_count": new_count}}
+    )
 
 
 @dp.message(Command("leaderboard"))
 async def leaderboard(message: types.Message):
-    """Display the top 10 performers for the daily leaderboard."""
+    """Display the daily top 10 leaderboard."""
     try:
-        # Fetch top 10 users for the daily leaderboard
+        # Fetch the top 10 users based on daily scores
         daily_leaderboard = await users_collection.find().sort("daily_score", -1).limit(10).to_list(length=None)
 
-        # Format the leaderboard message
+        # Build the leaderboard message
         leaderboard_message = "🏆 *Daily Top 10 Performers* 🏆\n\n"
         leaderboard_message += format_leaderboard_entries(daily_leaderboard, "daily_score")
 
-        # Send the formatted leaderboard
+        # Send the formatted leaderboard message
         await message.answer(leaderboard_message, parse_mode="MarkdownV2")
 
     except Exception as e:
@@ -716,14 +894,13 @@ async def leaderboard(message: types.Message):
         await message.answer("❌ An error occurred while generating the leaderboard. Please try again later.")
 
 def format_leaderboard_entries(users, score_field):
-    """Format leaderboard entries into a string."""
+    """Format leaderboard entries into a readable string."""
     entries = ""
     for rank, user in enumerate(users, 1):
         username = escape_markdown(user.get("username", "Unknown"))
         score = user.get(score_field, 0)
         entries += f"{rank}\\. {username} \\- {score} points\n"
     return entries
-
 
 def escape_markdown(text: str) -> str:
     """Escape special characters for Telegram's MarkdownV2."""
@@ -741,20 +918,6 @@ async def reset_daily_scores():
 
 
 
-@dp.message(Command("helpme"))
-async def helpme(message: types.Message):
-    """Admin help command listing all available admin commands."""
-    if not is_admin(message.from_user.id):
-        await message.reply("This command is restricted to admins.")
-        return
-
-    commands = (
-        "📋 **Admin Commands:**\n"
-        "1. /grant_access <user_id> - Grant unlimited access.\n"
-        "2. /revoke_access <user_id> - Revoke unlimited access.\n"
-        "3. /reset_leaderboard - Reset all users' scores.\n"
-    )
-    await message.answer(commands, parse_mode="Markdown")
 
 def normalize_category(category: str) -> str:
     """Normalize the category by converting to lowercase and replacing spaces with dashes."""
@@ -847,43 +1010,24 @@ async def has_valid_unlimited_access(user_id: int) -> bool:
 
 
 
-async def check_expiry_warning(user_id):
-    """Notify the user if their unlimited access is about to expire."""
-    user = await users_collection.find_one({"user_id": user_id})
-    if not user or not user.get("unlimited_access_expiry"):
-        return
-
-    expiry_date = user["unlimited_access_expiry"]
-    days_left = (expiry_date - datetime.now()).days
-
-    if 0 < days_left <= 5:
-        await bot.send_message(
-            user_id,
-            f"⚠️ Your unlimited access will expire in {days_left} days. Renew to continue enjoying uninterrupted access."
-        )
-
-async def is_in_cooldown(user_id):
-    """Check if the user is in cooldown before making another request."""
-    user = await users_collection.find_one({"user_id": user_id})
-    last_request_time = user.get("last_request_time") if user else None
-
-    if last_request_time and (datetime.now() - last_request_time) < timedelta(seconds=30):
-        return True
-
-    await users_collection.update_one(
-        {"user_id": user_id}, {"$set": {"last_request_time": datetime.now()}}, upsert=True
-    )
-    return False
-
 async def send_quiz(message, questions, requested_count, language):
     """Send quiz questions to the user."""
     user_id = message.from_user.id
+    chat_id = message.chat.id
     question_ids = [q['_id'] for q in questions]
 
+    # Generate a unique session ID for this quiz session
+    session_id = str(uuid.uuid4())
+
+    # Calculate the dynamic timeout duration (30 seconds per question)
+    timeout_duration = requested_count * 30  # e.g., 15 questions -> 450 seconds
+
+    # Store the session in the database
     await db["user_sessions"].update_one(
         {"user_id": user_id},
         {
             "$set": {
+                "session_id": session_id,
                 "question_ids": question_ids,
                 "answered": 0,
                 "sent": requested_count,
@@ -894,6 +1038,7 @@ async def send_quiz(message, questions, requested_count, language):
         upsert=True
     )
 
+    # Function to send each poll question
     async def send_poll(question_id):
         question = await polls_collection.find_one({"_id": question_id})
         lang_data = question['languages'][language]
@@ -901,7 +1046,7 @@ async def send_quiz(message, questions, requested_count, language):
 
         try:
             poll = await bot.send_poll(
-                chat_id=message.chat.id,
+                chat_id=chat_id,
                 question=lang_data['question'],
                 options=lang_data['options'][:10],
                 type='quiz',
@@ -912,8 +1057,13 @@ async def send_quiz(message, questions, requested_count, language):
         except Exception as e:
             logging.error(f"Error sending poll: {e}")
 
+    # Send all quiz questions concurrently
     await asyncio.gather(*(send_poll(q) for q in question_ids))
-    await message.answer(f"✅ {requested_count} questions sent!")
+
+    # Start the timeout task with the calculated duration
+    asyncio.create_task(check_quiz_timeout(user_id, session_id, chat_id, timeout_duration))
+
+    await message.answer(f"✅ {requested_count} questions sent! Answer them quickly to avoid timeout And After answering all question you will get explnantions and your result will be uploadede to leaderboard.")
 
 @dp.poll_answer()
 async def handle_poll_answer(poll_answer: PollAnswer):
@@ -1020,30 +1170,7 @@ def chunk_text(text, max_length=4096):
         text = text[split_index:].strip()
     return chunks
 
-async def check_quiz_timeout(user_id, chat_id):
-    """Check if the quiz has timed out and display the result if necessary."""
-    await asyncio.sleep(QUIZ_TIMEOUT)
-    session = await db["user_sessions"].find_one({"user_id": user_id})
 
-    if session and session.get("answered", 0) < session.get("sent", 0):
-        await bot.send_message(chat_id, "⏳ Time's up! Here's your quiz summary:")
-        await store_and_show_result(user_id, chat_id)
-
-
-@dp.message(Command("helpme"))
-async def helpme(message: types.Message):
-    """Admin help command."""
-    if not is_admin(message.from_user.id):
-        await message.reply("This command is restricted to admins.")
-        return
-
-    commands = (
-        "📋 **Admin Commands:**\n"
-        "1. /grant_access <user_id> - Grant unlimited access.\n"
-        "2. /revoke_access <user_id> - Revoke unlimited access.\n"
-        "3. /reset_leaderboard - Reset all users' scores.\n"
-    )
-    await message.answer(commands, parse_mode="Markdown")
 
 @dp.message(Command("grant_access"))
 async def handle_grant_access(message: types.Message):
@@ -1057,41 +1184,54 @@ async def handle_grant_access(message: types.Message):
         await message.reply("Usage: /grant_access <username_or_user_id>")
         return
 
+    # Handle both user ID and username inputs
     target = args[1]
-    if target.isdigit():
-        user_id = int(target)
-    else:
-        user = await users_collection.find_one({"username": target})
-        if not user:
-            await message.reply("User not found.")
-            return
-        user_id = user["user_id"]
+    user_id = await get_user_id(target)  # Unified logic for both username and ID
 
+    if not user_id:
+        await message.reply("User not found.")
+        return
+
+    # Grant unlimited access
     await grant_access(user_id)
-    await message.reply(f"Unlimited access granted to {target}.")
+    await message.reply(f"✅ Unlimited access granted to user with ID: {user_id}.")
+
+async def get_user_id(target: str) -> int | None:
+    """Fetch the user ID from the database using either username or user ID."""
+    if target.isdigit():
+        return int(target)  # If it's already a user ID, return it as an integer
+
+    # Try to find the user by username
+    user = await users_collection.find_one({"username": target})
+    if user:
+        return user["user_id"]
+    return None  # Return None if the user isn't found
 
 async def grant_access(user_id: int, duration_days: int = 30):
     """Grant unlimited access to a user."""
     expiry_date = datetime.now() + timedelta(days=duration_days)
 
-    # Update user with unlimited access and infinite daily questions
     await users_collection.update_one(
         {"user_id": user_id},
         {
             "$set": {
                 "unlimited_access": True,
                 "unlimited_access_expiry": expiry_date,
-                "daily_questions": float('inf')  # Set to unlimited
+                "daily_questions": float('inf')
             }
         },
         upsert=True
     )
 
     # Notify the user
-    await bot.send_message(
-        user_id,
-        f"🎉 Congratulations! You now have unlimited access until {expiry_date.strftime('%d %B %Y')}."
-    )
+    try:
+        await bot.send_message(
+            user_id,
+            f"🎉 Congratulations! You now have unlimited access until {expiry_date.strftime('%d %B %Y')}."
+        )
+    except Exception as e:
+        logging.error(f"Failed to notify user {user_id}: {e}")
+
 
 @dp.message(Command("revoke_access"))
 async def handle_revoke_access(message: types.Message):
@@ -1100,24 +1240,25 @@ async def handle_revoke_access(message: types.Message):
         await message.reply("This command is restricted to admins.")
         return
 
-    # Extract the target user ID from the command arguments
     args = message.text.split()
     if len(args) < 2:
-        await message.reply("Usage: /revoke_access <user_id>")
+        await message.reply("Usage: /revoke_access <username_or_user_id>")
         return
 
-    try:
-        user_id = int(args[1])
-    except ValueError:
-        await message.reply("Invalid user ID. Please provide a valid number.")
+    # Handle both user ID and username inputs
+    target = args[1]
+    user_id = await get_user_id(target)  # Reuse the same logic for both inputs
+
+    if not user_id:
+        await message.reply("User not found.")
         return
 
-    # Revoke unlimited access and reset daily questions to 30
+    # Revoke access and reset daily questions to 30
     await users_collection.update_one(
         {"user_id": user_id},
         {
             "$unset": {"unlimited_access": "", "unlimited_access_expiry": ""},
-            "$set": {"daily_questions": 30}  # Reset to 30 questions per day
+            "$set": {"daily_questions": 30}
         }
     )
 
@@ -1125,20 +1266,12 @@ async def handle_revoke_access(message: types.Message):
     try:
         await bot.send_message(user_id, "⚠️ Your unlimited access has been revoked.")
     except Exception as e:
-        logging.error(f"Failed to send message to user {user_id}: {e}")
+        logging.error(f"Failed to notify user {user_id}: {e}")
         await message.reply(f"⚠️ Could not notify user {user_id}. They might have blocked the bot.")
 
-    # Confirm the operation to the admin
-    await message.reply(f"✅ Unlimited access revoked for user {user_id}.")
-    
-async def verify_user_data(user_id):
-    """Check the user's data in the database after revocation."""
-    user = await users_collection.find_one({"user_id": user_id})
-    if user:
-        logging.info(f"User {user_id} data: {user}")
-        return user
-    else:
-        logging.error(f"User {user_id} not found.")
+    # Confirm to the admin
+    await message.reply(f"✅ Unlimited access revoked for user with ID: {user_id}.")
+
 
 
 
@@ -1160,7 +1293,6 @@ async def reset_daily_scores():
 
 
 
-
 async def reset_daily_questions():
     """Reset daily questions for all users at midnight."""
     await users_collection.update_many(
@@ -1170,17 +1302,23 @@ async def reset_daily_questions():
     logging.info("✅ Daily questions reset successfully.")
 
 async def schedule_resets():
-    """Schedule periodic resets for daily scores."""
+    """Schedule daily resets for scores and questions at midnight."""
     while True:
         now = datetime.now()
+        
+        # Calculate the next midnight
+        next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        seconds_until_midnight = (next_midnight - now).total_seconds()
 
-        # Reset daily questions and scores at midnight
-        if now.hour == 0 and now.minute == 0:
-            await reset_daily_questions()
-            await reset_daily_scores()
-            await asyncio.sleep(60)  # Avoid multiple triggers in the same minute
+        logging.info(f"Sleeping for {seconds_until_midnight} seconds until the next reset.")
 
-        await asyncio.sleep(30)  # Check periodically
+        # Sleep until midnight
+        await asyncio.sleep(seconds_until_midnight)
+
+        # Perform the resets
+        await reset_daily_questions()
+        await reset_daily_scores()
+        logging.info("✅ Daily questions and scores reset successfully.")
 
 
 
