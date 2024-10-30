@@ -4,8 +4,7 @@ import logging  # For logging messages and debugging
 from datetime import datetime, timedelta  # For handling dates and time calculations
 import os  # For interacting with the environment and loading environment variables
 import calendar  # For working with calendar dates
-from typing import Union
-
+from typing import Tuple, Optional
 # Aiogram core imports and filter handlers
 from aiogram import Bot, Dispatcher, types, F  # Core aiogram imports
 from aiogram.filters import Command  # Command filter for registering commands
@@ -814,21 +813,17 @@ async def handle_revoke_access(message: types.Message):
 
     await message.reply(f"✅ Unlimited access revoked for user {user_id}.")
 
-async def can_request_more_questions(user_id: int) -> tuple[bool, Union[str, None]]:
+async def can_request_more_questions(user_id: int) -> Tuple[bool, Optional[str]]:
     """Check if the user with unlimited access can request more questions."""
     user = await users_collection.find_one({"user_id": user_id})
-
     if not user or not user.get("unlimited_access"):
         # This function only applies to unlimited users, other users are handled separately.
         return False, None
-
     now = datetime.now()
     session = user.get("hourly_request_session", {})
-
     # Retrieve session data or set defaults.
     first_request_time = session.get("first_request_time", now)
     question_count = session.get("question_count", 0)
-
     # If it's been more than an hour, reset the session.
     if now - first_request_time >= timedelta(hours=1):
         await users_collection.update_one(
@@ -839,13 +834,11 @@ async def can_request_more_questions(user_id: int) -> tuple[bool, Union[str, Non
             }}}
         )
         return True, None  # User can request more questions
-
     # If the user has requested 60 questions within the hour, deny further requests.
     if question_count >= 60:
         next_available_time = first_request_time + timedelta(hours=1)
         wait_time = next_available_time - now
         return False, f"⏳ You've reached your limit of 60 questions this hour. Please try again in {wait_time}."
-
     # User can still request more questions within the hour.
     return True, None
 
@@ -853,15 +846,12 @@ async def update_hourly_request_count(user_id: int, additional_count: int):
     """Update the user's hourly request count."""
     user = await users_collection.find_one({"user_id": user_id})
     session = user.get("hourly_request_session", {})
-
     # Update the question count in the session.
     new_count = session.get("question_count", 0) + additional_count
-
     await users_collection.update_one(
         {"user_id": user_id},
         {"$set": {"hourly_request_session.question_count": new_count}}
     )
-
 
 @dp.message(Command("leaderboard"))
 async def leaderboard(message: types.Message):
@@ -1184,7 +1174,7 @@ async def handle_grant_access(message: types.Message):
     await grant_access(user_id)
     await message.reply(f"✅ Unlimited access granted to user with ID: {user_id}.")
 
-async def get_user_id(target: str) -> int | None:
+async def get_user_id(target: str) -> Optional[int]:
     """Fetch the user ID from the database using either username or user ID."""
     if target.isdigit():
         return int(target)  # If it's already a user ID, return it as an integer
