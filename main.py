@@ -4,6 +4,7 @@ import logging  # For logging messages and debugging
 from datetime import datetime, timedelta  # For handling dates and time calculations
 import os  # For interacting with the environment and loading environment variables
 import calendar  # For working with calendar dates
+from typing import Union
 
 # Aiogram core imports and filter handlers
 from aiogram import Bot, Dispatcher, types, F  # Core aiogram imports
@@ -813,7 +814,7 @@ async def handle_revoke_access(message: types.Message):
 
     await message.reply(f"✅ Unlimited access revoked for user {user_id}.")
 
-async def can_request_more_questions(user_id: int) -> tuple[bool, str | None]:
+async def can_request_more_questions(user_id: int) -> tuple[bool, Union[str, None]]:
     """Check if the user with unlimited access can request more questions."""
     user = await users_collection.find_one({"user_id": user_id})
 
