@@ -1144,10 +1144,7 @@ async def reset_daily_scores():
     await users_collection.update_many({}, {"$set": {"daily_score": 0}})
     logging.info("✅ Daily scores reset successfully.")
 
-async def reset_monthly_scores():
-    """Reset monthly scores on the last day of the month."""
-    await users_collection.update_many({}, {"$set": {"monthly_score": 0}})
-    logging.info("✅ Monthly scores reset successfully.")
+
 
 
 
