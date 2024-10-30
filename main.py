@@ -2,7 +2,6 @@
 import asyncio  # For asynchronous operations and event loops
 import logging  # For logging messages and debugging
 from datetime import datetime, timedelta  # For handling dates and time calculations
-import os  # For interacting with the environment and loading environment variables
 import calendar  # For working with calendar dates
 
 # Aiogram core imports and filter handlers
@@ -25,13 +24,14 @@ from motor.motor_asyncio import AsyncIOMotorClient  # Asynchronous MongoDB drive
 
 # Load environment variables from .env files
 from dotenv import load_dotenv
+import os
 import re
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage  # In-memory FSM storage
 import random
 
-# Ensure environment variables are loaded correctly
+# Load environment variables from .env file
 load_dotenv()
 
 # Initialize logging
@@ -43,6 +43,10 @@ logging.basicConfig(
 # Load environment variables
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
+
+# Debug: Check if the variables are loaded correctly
+print(f"Bot Token: {BOT_TOKEN}")
+print(f"Mongo URI: {MONGO_URI}")
 
 # Initialize bot with default properties
 bot = Bot(
@@ -682,27 +686,14 @@ async def handle_revoke_access(message: types.Message):
 
 @dp.message(Command("leaderboard"))
 async def leaderboard(message: types.Message):
-    """Display the top performers leaderboard for daily, monthly, and overall scores."""
+    """Display the top 10 performers for the daily leaderboard."""
     try:
-        # Fetch top 10 users for each category
+        # Fetch top 10 users for the daily leaderboard
         daily_leaderboard = await users_collection.find().sort("daily_score", -1).limit(10).to_list(length=None)
-        monthly_leaderboard = await users_collection.find().sort("monthly_score", -1).limit(10).to_list(length=None)
-        overall_leaderboard = await users_collection.find().sort("total_score", -1).limit(10).to_list(length=None)
 
-        # Build the leaderboard message with all three sections
-        leaderboard_message = "🏆 *Top Performers* 🏆\n\n"
-
-        # Format and add Daily Leaderboard
-        leaderboard_message += "*🗓 Daily Top 10 🗓*\n"
+        # Format the leaderboard message
+        leaderboard_message = "🏆 *Daily Top 10 Performers* 🏆\n\n"
         leaderboard_message += format_leaderboard_entries(daily_leaderboard, "daily_score")
-
-        # Format and add Monthly Leaderboard
-        leaderboard_message += "\n📅 *Monthly Top 10 📅*\n"
-        leaderboard_message += format_leaderboard_entries(monthly_leaderboard, "monthly_score")
-
-        # Format and add Overall Leaderboard
-        leaderboard_message += "\n🌟 *Overall Top 10 🌟*\n"
-        leaderboard_message += format_leaderboard_entries(overall_leaderboard, "total_score")
 
         # Send the formatted leaderboard
         await message.answer(leaderboard_message, parse_mode="MarkdownV2")
@@ -710,8 +701,6 @@ async def leaderboard(message: types.Message):
     except Exception as e:
         logging.error(f"Error generating leaderboard: {e}")
         await message.answer("❌ An error occurred while generating the leaderboard. Please try again later.")
-
-
 
 def format_leaderboard_entries(users, score_field):
     """Format leaderboard entries into a string."""
@@ -735,11 +724,6 @@ async def reset_daily_scores():
     """Reset daily scores at midnight."""
     await users_collection.update_many({}, {"$set": {"daily_score": 0}})
     logging.info("✅ Daily scores reset successfully.")
-
-async def reset_monthly_scores():
-    """Reset monthly scores on the last day of the month."""
-    await users_collection.update_many({}, {"$set": {"monthly_score": 0}})
-    logging.info("✅ Monthly scores reset successfully.")
 
 
 
@@ -1176,7 +1160,7 @@ async def reset_daily_questions():
     logging.info("✅ Daily questions reset successfully.")
 
 async def schedule_resets():
-    """Schedule periodic resets for daily and monthly scores."""
+    """Schedule periodic resets for daily scores."""
     while True:
         now = datetime.now()
 
@@ -1186,13 +1170,8 @@ async def schedule_resets():
             await reset_daily_scores()
             await asyncio.sleep(60)  # Avoid multiple triggers in the same minute
 
-        # Reset monthly scores on the last day of the month
-        last_day = calendar.monthrange(now.year, now.month)[1]
-        if now.day == last_day and now.hour == 23 and now.minute == 59:
-            await reset_monthly_scores()
-            await asyncio.sleep(60)
-
         await asyncio.sleep(30)  # Check periodically
+
 
 
 async def main():
